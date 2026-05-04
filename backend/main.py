@@ -13,10 +13,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
 from backend.agent_runtime import run_parallel_tools
+from backend.agent_critic import apply_critic_guard, build_agent_plan, critique_answer
+from backend.confidence import compute_answer_confidence_score
+from backend.decision_policy import classify_decision_by_policy
 from backend.llm_client import call_openai_compatible
+from backend.llm_output import format_structured_llm, parse_structured_llm, structured_output_instruction
+from backend.persistence import append_event, init_db
+from backend.rules_config import get_intent_patterns, get_position_mapping, get_risk_policy, get_tool_patterns
+from backend.schemas import ChatRequest, FeedbackRequest, WatchlistRequest
+from backend.strategy_memory import build_strategy_memory, build_strategy_memory_line
+from backend.tool_budget import apply_tool_budget
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +43,7 @@ def load_env() -> None:
 
 
 load_env()
+init_db()
 
 app = FastAPI(title="AI 游资框架集合体数字人", version="2.0")
 app.add_middleware(
@@ -44,25 +53,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=ROOT), name="static")
-
-
-class ChatRequest(BaseModel):
-    question: str
-    session_id: str = "default"
-    role: str = "cycle"
-
-
-class FeedbackRequest(BaseModel):
-    session_id: str = "default"
-    question: str
-    answer: str
-    useful: bool
-
-
-class WatchlistRequest(BaseModel):
-    session_id: str = "default"
-    question: str = ""
-    code: str | None = None
 
 
 LOCAL_STOCK_ALIASES = {
@@ -315,15 +305,29 @@ def chat(request: ChatRequest) -> dict[str, Any]:
     rule_text = build_agent_reply(question, stock, quote, analysis, trend, market_context, user_state, decision, related_knowledge, thinking_framework, emotion, role_profile, slang_notes, sector_context, market_sentiment, mainline_rank, experience_cases)
     prompt_context = build_prompt_context(session_id, question, stock, quote, analysis, trend, market_context, market_sentiment, sector_context, user_state, decision, related_knowledge, experience_cases, thinking_framework, emotion, role_profile, slang_notes, agent_steps, rule_text)
     llm_text, llm_status = call_llm(prompt_context)
-    text = llm_text or rule_text
+    structured_llm = parse_structured_llm(llm_text, decision)
+    if structured_llm:
+        text = format_structured_llm(structured_llm, rule_text)
+        llm_status = {**llm_status, "structured": "ok"}
+    else:
+        text = llm_text or rule_text
+        if llm_text:
+            llm_status = {**llm_status, "structured": "fallback_plain_text"}
     if quote and analysis and decision and "【交易剧本】" not in text:
         text = f"{text}\n{build_execution_matrix(question, quote, analysis, trend, user_state, decision)}"
     reminder = build_personal_risk_reminder(session_id, question)
     if reminder:
         text = f"{text}\n{reminder}"
+    strategy_memory = build_strategy_memory(session_id, get_profile(session_id))
+    strategy_line = build_strategy_memory_line(strategy_memory)
+    if strategy_line:
+        text = f"{text}\n{strategy_line}"
+    confidence = compute_answer_confidence(quote, trend, market_context, market_sentiment, sector_context, llm_status)
+    agent_plan = build_agent_plan(question, decision, tool_plan, confidence)
+    critic = critique_answer(text, decision, risk_veto, confidence)
+    text = apply_critic_guard(text, critic)
     action = select_action(text, analysis)
     update_session_memory(session_id, question, text, stock, quote, user_state, role)
-    confidence = compute_answer_confidence(quote, trend, market_context, market_sentiment, sector_context, llm_status)
     data_lineage = build_data_lineage(quote, trend, market_context, market_sentiment, sector_context, market_dashboard, mainline_rank, confidence, llm_status)
     decision_audit = build_decision_audit(session_id, question, role, stock, original_decision, decision, risk_veto, confidence, data_lineage, agent_steps)
     persist_decision_audit(decision_audit)
@@ -353,6 +357,11 @@ def chat(request: ChatRequest) -> dict[str, Any]:
         "role_profile": role_profile,
         "agent_steps": agent_steps,
         "tool_plan": tool_plan,
+        "tool_execution_plan": agent_result.get("tool_execution_plan"),
+        "tool_budget": agent_result.get("tool_budget"),
+        "agent_plan": agent_plan,
+        "agent_critic": critic,
+        "strategy_memory": strategy_memory,
         "llm_status": llm_status,
         "answer_confidence": confidence,
         "data_lineage": data_lineage,
@@ -407,6 +416,7 @@ def feedback(request: FeedbackRequest) -> dict[str, str]:
     key = "useful_count" if request.useful else "not_useful_count"
     profile[key] = profile.get(key, 0) + 1
     save_user_profiles()
+    append_event("feedback", request.session_id, record)
     return {"status": "ok"}
 
 
@@ -444,6 +454,23 @@ def premarket_plan(session_id: str = "default", role: str = "cycle") -> dict[str
 @app.get("/api/source-health")
 def source_health() -> dict[str, Any]:
     return {"items": get_data_source_health()}
+
+
+@app.get("/api/profile/summary")
+def profile_summary(session_id: str = "default") -> dict[str, Any]:
+    profile = get_profile(session_id)
+    mistake_profile = build_mistake_profile(session_id)
+    strategy_memory = build_strategy_memory(session_id, profile)
+    return {
+        "session_id": session_id,
+        "strategy_memory": strategy_memory,
+        "mistake_profile": mistake_profile,
+        "watchlist_count": len(profile.get("watchlist", [])),
+        "turn_count": len(profile.get("turns", [])),
+        "last_stock": profile.get("last_stock"),
+        "useful_count": profile.get("useful_count", 0),
+        "not_useful_count": profile.get("not_useful_count", 0),
+    }
 
 
 @app.get("/api/audit/latest")
@@ -516,19 +543,25 @@ def run_agent(question: str, session_id: str, role: str) -> dict[str, Any]:
         steps.append({"name": "标的解析", "status": "skip", "detail": "未识别到明确 A 股标的，转为通用短线框架"})
 
     tool_plan = build_tool_plan(question, intent, stock, user_state)
-    enabled_tools = "、".join(name for name, enabled in tool_plan.items() if enabled) or "仅本地规则"
+    tool_budget = apply_tool_budget(intent, tool_plan)
+    execution_plan = tool_budget["plan"]
+    enabled_tools = "、".join(name for name, enabled in execution_plan.items() if enabled) or "仅本地规则"
+    if tool_budget.get("skipped"):
+        enabled_tools += f"；预算跳过：{'、'.join(tool_budget['skipped'])}"
     steps.append({"name": "工具路由", "status": "done", "detail": f"启用：{enabled_tools}"})
+    for message in tool_budget.get("degradation", []):
+        steps.append({"name": "工具降级", "status": "partial", "detail": message})
 
     tool_specs = {}
-    if tool_plan["market"]:
+    if execution_plan["market"]:
         tool_specs["market_context"] = fetch_market_context
-    if tool_plan["sentiment"]:
+    if execution_plan["sentiment"]:
         tool_specs["market_sentiment"] = fetch_market_sentiment
-    if stock and tool_plan["quote"]:
+    if stock and execution_plan["quote"]:
         tool_specs["quote"] = lambda: fetch_quote(stock["code"])
-    if stock and tool_plan["kline"]:
+    if stock and execution_plan["kline"]:
         tool_specs["kline"] = lambda: fetch_kline(stock["code"])
-    if tool_plan["sector"]:
+    if execution_plan["sector"]:
         tool_specs["sector_context"] = lambda: fetch_sector_context(stock["code"] if stock else None)
 
     tool_results = run_parallel_tools(tool_specs)
@@ -537,7 +570,7 @@ def run_agent(question: str, session_id: str, role: str) -> dict[str, Any]:
     if market_context:
         summary = "；".join(f"{item['name']} {fmt(item.get('change_percent'))}%" for item in market_context)
         steps.append({"name": "市场环境", "status": "done", "detail": summary})
-    elif tool_plan["market"]:
+    elif execution_plan["market"]:
         steps.append({"name": "市场环境", "status": "partial", "detail": "指数行情暂不可用，降低结论强度"})
     else:
         steps.append({"name": "市场环境", "status": "skip", "detail": "当前问题不需要实时指数，跳过远程行情"})
@@ -545,13 +578,13 @@ def run_agent(question: str, session_id: str, role: str) -> dict[str, Any]:
     market_sentiment = tool_results.get("market_sentiment")
     if market_sentiment:
         steps.append({"name": "情绪温度", "status": "done", "detail": f"上涨{market_sentiment['up_count']}，下跌{market_sentiment['down_count']}，涨停{market_sentiment['limit_up_count']}，跌停{market_sentiment['limit_down_count']}，样本{market_sentiment.get('sample_count', '--')}/{market_sentiment.get('total_count', '--')}"})
-    elif not tool_plan["sentiment"]:
+    elif not execution_plan["sentiment"]:
         steps.append({"name": "情绪温度", "status": "skip", "detail": "当前问题不需要全市场情绪统计"})
 
     quote = tool_results.get("quote")
     if quote:
         steps.append({"name": "个股行情", "status": "done", "detail": f"{quote['name']} 现价 {fmt(quote.get('price'))}，涨跌幅 {fmt(quote.get('change_percent'))}%"})
-    elif stock and tool_plan["quote"]:
+    elif stock and execution_plan["quote"]:
         steps.append({"name": "个股行情", "status": "partial", "detail": "已识别标的，但行情源暂未返回有效数据"})
     elif stock:
         steps.append({"name": "个股行情", "status": "skip", "detail": "当前问题不需要实时个股行情"})
@@ -564,7 +597,7 @@ def run_agent(question: str, session_id: str, role: str) -> dict[str, Any]:
     trend = analyze_trend(kline, quote)
     if trend:
         steps.append({"name": "趋势验证", "status": "done", "detail": f"{trend['trend_label']}，量能 {trend['volume_label']}，支撑 {fmt(trend.get('support'))}，压力 {fmt(trend.get('resistance'))}"})
-    elif stock and not tool_plan["kline"]:
+    elif stock and not execution_plan["kline"]:
         steps.append({"name": "趋势验证", "status": "skip", "detail": "当前问题不需要历史K线"})
 
     thinking_framework = build_thinking_framework(question, intent, quote, analysis, market_context)
@@ -573,7 +606,7 @@ def run_agent(question: str, session_id: str, role: str) -> dict[str, Any]:
     sector_context = tool_results.get("sector_context")
     if sector_context:
         steps.append({"name": "板块主线", "status": "done", "detail": f"所属{sector_context['sector']}；板块热度{sector_context['heat_label']}；榜首{sector_context.get('top_sector', '--')}"})
-    elif not tool_plan["sector"]:
+    elif not execution_plan["sector"]:
         steps.append({"name": "板块主线", "status": "skip", "detail": "当前问题不需要板块主线工具"})
 
     experience_cases = retrieve_experience_cases(question, intent, quote, analysis, trend, market_context, market_sentiment, sector_context, user_state)
@@ -610,6 +643,8 @@ def run_agent(question: str, session_id: str, role: str) -> dict[str, Any]:
         "slang_notes": slang_notes,
         "agent_steps": steps,
         "tool_plan": tool_plan,
+        "tool_execution_plan": execution_plan,
+        "tool_budget": tool_budget,
     }
 
 
@@ -620,9 +655,10 @@ def should_skip_stock_resolution(question: str, intent: str) -> bool:
 
 
 def build_tool_plan(question: str, intent: str, stock: dict[str, str] | None, user_state: dict[str, Any]) -> dict[str, bool]:
-    asks_market = bool(re.search(r"大盘|指数|市场|行情|情绪|周期|主线|板块|题材|方向|机会|买什么|买哪些|做什么|看什么|进攻|防守|退潮|赚钱效应|亏钱效应|复盘观察池", question))
-    asks_trade = bool(re.search(r"买|卖|涨|跌|持有|减仓|止损|被套|成本|仓|追高|打板|半路|走势|怎么看|怎么办|后面|如何|分析|看一下|看看", question))
-    asks_review = bool(re.search(r"复盘|错在哪|为什么亏|吃面|被套原因", question))
+    patterns = get_tool_patterns()
+    asks_market = bool(re.search(patterns.get("market") or r"大盘|指数|市场|行情|情绪|周期|主线|板块|题材|方向|机会|买什么|买哪些|做什么|看什么|进攻|防守|退潮|赚钱效应|亏钱效应|复盘观察池", question))
+    asks_trade = bool(re.search(patterns.get("trade") or r"买|卖|涨|跌|持有|减仓|止损|被套|成本|仓|追高|打板|半路|走势|怎么看|怎么办|后面|如何|分析|看一下|看看", question))
+    asks_review = bool(re.search(patterns.get("review") or r"复盘|错在哪|为什么亏|吃面|被套原因", question))
     has_stock = bool(stock)
     needs_stock_data = has_stock and (asks_trade or asks_review or "个股" in intent)
     needs_market = asks_market or needs_stock_data
@@ -667,7 +703,7 @@ def parse_user_state(question: str) -> dict[str, Any]:
 
 
 def parse_position_level(value: str) -> float | None:
-    mapping = {"一": 0.1, "二": 0.2, "三": 0.3, "四": 0.4, "五": 0.5, "半": 0.5, "六": 0.6, "七": 0.7, "八": 0.8, "九": 0.9, "十": 1.0}
+    mapping = get_position_mapping() or {"一": 0.1, "二": 0.2, "三": 0.3, "四": 0.4, "五": 0.5, "半": 0.5, "六": 0.6, "七": 0.7, "八": 0.8, "九": 0.9, "十": 1.0}
     if value in mapping:
         return mapping[value]
     try:
@@ -1173,35 +1209,7 @@ def build_personal_risk_reminder(session_id: str, question: str) -> str:
 
 
 def compute_answer_confidence(quote: dict[str, Any] | None, trend: dict[str, Any] | None, market_context: list[dict[str, Any]], sentiment: dict[str, Any] | None, sector: dict[str, Any] | None, llm_status: dict[str, str]) -> dict[str, Any]:
-    score = 35
-    items = []
-    if quote:
-        score += 20
-        items.append("个股行情可用")
-    else:
-        items.append("个股行情缺失")
-    if trend:
-        score += 15
-        items.append("历史K线可用")
-    else:
-        items.append("历史K线缺失")
-    if market_context:
-        score += 10
-        items.append("指数数据可用")
-    if sentiment and (sentiment.get("coverage") or 0) >= 0.95:
-        score += 12
-        items.append("情绪样本覆盖充分")
-    elif sentiment:
-        score += 5
-        items.append("情绪样本覆盖不足")
-    if sector:
-        score += 8
-        items.append("板块数据可用")
-    if llm_status.get("status") == "ok":
-        score += 5
-        items.append("LLM表达正常")
-    label = "高" if score >= 82 else "中" if score >= 60 else "低"
-    return {"score": min(score, 100), "label": label, "items": items, "is_trading_time": is_a_share_trading_time(), "data_source": "腾讯/新浪/东方财富公开数据"}
+    return compute_answer_confidence_score(quote, trend, market_context, sentiment, sector, llm_status, is_a_share_trading_time)
 
 
 def evaluate_risk_veto(
@@ -1216,25 +1224,37 @@ def evaluate_risk_veto(
 ) -> dict[str, Any]:
     reasons = []
     level = "none"
+    policy = get_risk_policy()
+    patterns = policy.get("patterns", {}) if isinstance(policy, dict) else {}
+    thresholds = policy.get("thresholds", {}) if isinstance(policy, dict) else {}
+    attack_pattern = patterns.get("attack") or r"买|进|加仓|满仓|梭哈|打板|半路"
+    attack_extended_pattern = patterns.get("attack_extended") or r"买|进|加仓|追|打板|半路|梭哈"
+    all_in_pattern = patterns.get("all_in") or r"满仓|梭哈| all in |重仓"
+    average_down_pattern = patterns.get("average_down") or r"补仓|加仓|摊薄|再买"
+    bottom_fish_pattern = patterns.get("bottom_fish") or r"买|进|抄底|补仓|加仓"
+    high_risk_chase_pattern = patterns.get("high_risk_chase") or r"追|打板|半路|重仓|梭哈"
+    heavy_position_threshold = float(thresholds.get("heavy_position", 0.7))
+    extreme_drop_pct = float(thresholds.get("extreme_drop_pct", -7))
+    weak_intraday_position = float(thresholds.get("weak_intraday_position", 20))
     pct = analysis.get("pct") if analysis else None
     position = analysis.get("position_in_range") if analysis else None
-    if not quote and re.search(r"买|进|加仓|满仓|梭哈|打板|半路", question):
+    if not quote and re.search(attack_pattern, question):
         reasons.append("个股行情缺失，禁止给进攻结论")
-    if sentiment and sentiment.get("sentiment_label") == "退潮" and re.search(r"买|进|加仓|追|打板|半路|梭哈", question):
+    if sentiment and sentiment.get("sentiment_label") == "退潮" and re.search(attack_extended_pattern, question):
         reasons.append("市场情绪退潮，进攻动作一票否决")
-    if user_state.get("position_level") and user_state["position_level"] >= 0.7:
+    if user_state.get("position_level") and user_state["position_level"] >= heavy_position_threshold:
         reasons.append("用户仓位已过重，禁止继续提高风险暴露")
-    if re.search(r"满仓|梭哈| all in |重仓", question, re.IGNORECASE):
+    if re.search(all_in_pattern, question, re.IGNORECASE):
         reasons.append("出现满仓/梭哈倾向，触发强制降温")
-    if user_state.get("scenario") == "被套处理" and re.search(r"补仓|加仓|摊薄|再买", question):
+    if user_state.get("scenario") == "被套处理" and re.search(average_down_pattern, question):
         reasons.append("被套场景下补仓摊薄，一票否决")
-    if pct is not None and pct <= -7 and re.search(r"买|进|抄底|补仓|加仓", question):
+    if pct is not None and pct <= extreme_drop_pct and re.search(bottom_fish_pattern, question):
         reasons.append("个股接近极端杀跌，禁止冲动抄底")
-    if trend and trend.get("trend_label") == "空头趋势" and re.search(r"买|进|补仓|加仓|抄底", question):
+    if trend and trend.get("trend_label") == "空头趋势" and re.search(bottom_fish_pattern, question):
         reasons.append("K线为空头趋势，逆势进攻被否决")
-    if sector and sector.get("heat_label") in {"非主线", "未知"} and re.search(r"追|打板|半路|重仓|梭哈", question):
+    if sector and sector.get("heat_label") in {"非主线", "未知"} and re.search(high_risk_chase_pattern, question):
         reasons.append("标的不在清晰主线，禁止高风险追击")
-    if position is not None and position <= 20 and pct is not None and pct < 0 and re.search(r"买|进|补仓|加仓", question):
+    if position is not None and position <= weak_intraday_position and pct is not None and pct < 0 and re.search(bottom_fish_pattern, question):
         reasons.append("价格贴近日内低位且下跌，抛压未释放")
 
     if any("满仓" in item or "梭哈" in item or "一票否决" in item for item in reasons):
@@ -1344,6 +1364,7 @@ def persist_decision_audit(audit: dict[str, Any]) -> None:
     record["data_lineage"] = audit.get("data_lineage", [])[:8]
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    append_event("audit", audit.get("session_id") or "default", record)
 
 
 def load_latest_audits(session_id: str, limit: int) -> list[dict[str, Any]]:
@@ -2436,22 +2457,7 @@ def build_decision_panel(decision: dict[str, Any] | None, market_context: list[d
 
 
 def classify_decision(score: int, analysis: dict[str, Any], user_state: dict[str, Any], opportunity: dict[str, Any] | None = None) -> tuple[str, str, str]:
-    pct = analysis.get("pct") or 0
-    risk = analysis.get("risk_level")
-    scenario = user_state.get("scenario")
-    if risk == "高" and pct < 0:
-        return "明确回避", "0 成", "不抄底、不加仓；已有仓位优先等反抽减压或按纪律止损。"
-    if opportunity and score >= 68:
-        return "可小仓试错", "1-2 成", "符合强势/承接条件，可以按触发条件小仓试错，错了立刻撤。"
-    if score >= 72:
-        return "可小仓试错", "1 成", "评分达标，但仍必须等触发条件，不允许满仓追。"
-    if score >= 58:
-        return "纳入观察", "0-1 成", "等待触发条件出现再考虑试错。"
-    if score >= 42:
-        return "等待确认", "0 成", "现在不动，等指数、板块、承接三项确认。"
-    if scenario == "被套处理":
-        return "减压防守", "不加仓", "不做摊薄，反抽优先降风险。"
-    return "明确回避", "0 成", "当前不符合高胜率短线框架。"
+    return classify_decision_by_policy(score, analysis, user_state, opportunity)
 
 
 def build_trigger_condition(quote: dict[str, Any], analysis: dict[str, Any], market_context: list[dict[str, Any]]) -> str:
@@ -2497,6 +2503,7 @@ def build_prompt_context(
     ]
     compact_steps = [f"{step['name']}:{step['detail']}" for step in agent_steps[-6:]]
     conversation_context = build_conversation_context(session_id)
+    strategy_memory = build_strategy_memory(session_id, get_profile(session_id))
     return json.dumps(
         {
             "question": question,
@@ -2519,6 +2526,7 @@ def build_prompt_context(
             "emotion": emotion,
             "knowledge": compact_knowledge,
             "experience_cases": compact_experience,
+            "strategy_memory": strategy_memory,
             "slang": slang_notes,
             "steps": compact_steps,
             "rule_answer": rule_text[:1200],
@@ -2528,6 +2536,7 @@ def build_prompt_context(
                 "如果信息不足，先说明缺哪些关键变量，不要硬编；"
                 "如果是系统能力或闲聊问题，简短自然说明，再引导用户给出具体交易场景。"
                 "不要预测涨跌，不荐股，不输出确定收益。"
+                + structured_output_instruction()
             ),
             "style_guardrails": [
                 "不要机械重复规则答案，保留人的语气和承接。",
@@ -2998,6 +3007,11 @@ def select_action(text: str, analysis: dict[str, Any] | None) -> dict[str, str]:
 
 
 def detect_intent(question: str) -> str:
+    for item in get_intent_patterns():
+        pattern = item.get("pattern")
+        intent = item.get("intent")
+        if pattern and intent and re.search(pattern, question):
+            return intent
     if re.search(r"模型|大模型|接口|智能|正常沟通|像人|你能做什么|怎么用", question):
         return "系统能力沟通"
     if re.search(r"你好|在吗|谢谢|辛苦|哈哈|聊聊", question):

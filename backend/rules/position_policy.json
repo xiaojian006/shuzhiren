@@ -1,0 +1,26 @@
+{
+  "position_mapping": {
+    "一": 0.1,
+    "二": 0.2,
+    "三": 0.3,
+    "四": 0.4,
+    "五": 0.5,
+    "半": 0.5,
+    "六": 0.6,
+    "七": 0.7,
+    "八": 0.8,
+    "九": 0.9,
+    "十": 1.0
+  },
+  "decision_bands": [
+    {"min_score": 72, "label": "可小仓试错", "position_limit": "1 成", "action": "评分达标，但仍必须等触发条件，不允许满仓追。"},
+    {"min_score": 58, "label": "纳入观察", "position_limit": "0-1 成", "action": "等待触发条件出现再考虑试错。"},
+    {"min_score": 42, "label": "等待确认", "position_limit": "0 成", "action": "现在不动，等指数、板块、承接三项确认。"}
+  ],
+  "opportunity_rule": {
+    "min_score": 68,
+    "label": "可小仓试错",
+    "position_limit": "1-2 成",
+    "action": "符合强势/承接条件，可以按触发条件小仓试错，错了立刻撤。"
+  }
+}

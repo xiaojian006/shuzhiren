@@ -1,0 +1,13 @@
+{
+  "max_remote_tools": 4,
+  "review_priority": ["sentiment", "sector", "market", "quote", "kline"],
+  "market_priority": ["market", "sentiment", "sector", "quote", "kline"],
+  "stock_priority": ["quote", "kline", "market", "sentiment", "sector"],
+  "degradation_messages": {
+    "quote": "个股行情被预算跳过或不可用，只做框架判断",
+    "kline": "K线趋势被预算跳过，趋势置信度下调",
+    "sentiment": "市场情绪被预算跳过，无法确认赚钱/亏钱效应",
+    "sector": "板块工具被预算跳过，主线地位需要人工复核",
+    "market": "指数工具被预算跳过，市场总开关不完整"
+  }
+}

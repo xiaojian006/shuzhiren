@@ -21,6 +21,9 @@ const auditReplayPanel = document.querySelector("#auditReplayPanel");
 const sourceHealthPanel = document.querySelector("#sourceHealthPanel");
 const watchAlertsPanel = document.querySelector("#watchAlertsPanel");
 const premarketPlanPanel = document.querySelector("#premarketPlanPanel");
+const userProfilePanel = document.querySelector("#userProfilePanel");
+const auditExplainBtn = document.querySelector("#auditExplainBtn");
+const auditExplainPanel = document.querySelector("#auditExplainPanel");
 
 let muted = false;
 let quoteRequestId = 0;
@@ -29,6 +32,7 @@ let speechInterrupted = false;
 let thinkingTimer = null;
 let idleMotionTimer = null;
 let watchAlertTimer = null;
+let lastBackendReply = null;
 const sessionId = localStorage.getItem("digitalHumanSessionId") || crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 localStorage.setItem("digitalHumanSessionId", sessionId);
 
@@ -541,10 +545,19 @@ function interruptDigitalHuman() {
 }
 
 function setBackendAvatarState(reply) {
-  avatar.className = `avatar ${reply.mood || "calm"} ${reply.motion || detectMotionFromText(reply.text)}`.trim();
-  moodText.textContent = reply.mood === "alert" ? "谨慎提醒" : reply.mood === "thinking" ? "思考推演" : "冷静观察";
+  const state = detectAgentState(reply);
+  avatar.className = `avatar ${state.mood} ${state.motion}`.trim();
+  moodText.textContent = state.label;
   intentText.textContent = reply.intent || "综合判断";
-  gesture.textContent = reply.gesture || "观察盘面";
+  gesture.textContent = state.gesture || reply.gesture || "观察盘面";
+}
+
+function detectAgentState(reply) {
+  if (reply?.risk_veto?.blocked) return { mood: "alert", motion: "warn", label: "风控否决", gesture: "压住风险" };
+  if ((reply?.answer_confidence?.score ?? 100) < 55) return { mood: "thinking", motion: "think", label: "低置信推演", gesture: "标注数据缺口" };
+  if (reply?.intent?.includes("市场机会")) return { mood: "thinking", motion: "point", label: "机会扫描", gesture: "筛选主线" };
+  if (reply?.agent_critic && reply.agent_critic.passed === false) return { mood: "alert", motion: "knock", label: "自检修正", gesture: "校验回答" };
+  return { mood: reply?.mood || "calm", motion: reply?.motion || detectMotionFromText(reply?.text || ""), label: reply?.mood === "alert" ? "谨慎提醒" : reply?.mood === "thinking" ? "思考推演" : "冷静观察", gesture: reply?.gesture || "观察盘面" };
 }
 
 function detectMotionFromText(text = "") {
@@ -658,6 +671,39 @@ function updateAuditPanel(audit) {
     <p>审计ID：${audit.id}</p>
     <p>原始结论：${audit.original_label || "--"}；最终结论：${audit.final_label || "--"}；仓位：${audit.position_limit || "--"}</p>
     <p>证据：${(audit.evidence || []).slice(0, 3).join("；") || "暂无"}</p>
+  `;
+}
+
+function updateUserProfilePanel(memory) {
+  if (!userProfilePanel || !memory) return;
+  const strategy = memory.strategy_memory || memory;
+  const mistake = memory.mistake_profile || {};
+  const scenarios = (strategy.frequent_scenarios || []).map(([name, count]) => `${name} ${count}次`).join("；") || "暂无高频场景";
+  const risks = (strategy.recent_risks || []).join("；") || "暂无近期重复风险";
+  userProfilePanel.innerHTML = `
+    <p>高频场景：${scenarios}</p>
+    <p>近期风险：${risks}</p>
+    <p>错因画像：${(mistake.active || []).join("、") || mistake.primary || "暂无稳定错因"}</p>
+    <p>负反馈：${strategy.recent_negative_feedback_count || memory.not_useful_count || 0} 次</p>
+    <p>观察池：${memory.watchlist_count ?? "--"} 个；历史轮次：${memory.turn_count ?? "--"}</p>
+  `;
+}
+
+function explainLastAudit() {
+  if (!auditExplainPanel) return;
+  const reply = lastBackendReply;
+  if (!reply?.decision_audit) {
+    auditExplainPanel.textContent = "暂无可复盘回答。";
+    return;
+  }
+  const audit = reply.decision_audit;
+  const lineage = (reply.data_lineage || []).filter((item) => item.available).map((item) => item.name).join("、") || "无实时数据";
+  const risk = (reply.risk_veto?.reasons || []).join("；") || "未触发风控否决";
+  auditExplainPanel.innerHTML = `
+    <p>为什么是这个结论：${(audit.evidence || []).slice(0, 5).join("；") || "证据不足"}</p>
+    <p>使用数据：${lineage}</p>
+    <p>风控检查：${risk}</p>
+    <p>仓位上限：${audit.position_limit || "--"}</p>
   `;
 }
 
@@ -794,6 +840,17 @@ async function loadWatchlist() {
   }
 }
 
+async function loadUserProfile() {
+  try {
+    const response = await fetch(`/api/profile/summary?session_id=${encodeURIComponent(sessionId)}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    updateUserProfilePanel(data);
+  } catch (error) {
+    // 后端未启动时保持默认占位。
+  }
+}
+
 async function loadMarketDashboard() {
   try {
     const response = await fetch("/api/market-dashboard");
@@ -917,6 +974,7 @@ async function answerQuestion(question) {
     await startThinking(question);
     try {
       const backendReply = await callBackendChat(question);
+      lastBackendReply = backendReply;
       progressSource?.close();
       setBackendAvatarState(backendReply);
       addAgentTrace(backendReply.agent_steps);
@@ -930,9 +988,11 @@ async function answerQuestion(question) {
       updateRiskVetoPanel(backendReply.risk_veto);
       updateLineagePanel(backendReply.data_lineage || []);
       updateAuditPanel(backendReply.decision_audit);
+      updateUserProfilePanel(backendReply.strategy_memory);
       updateSourceHealthPanel(backendReply.source_health || []);
       loadAuditReplay();
       loadWatchAlerts();
+      loadUserProfile();
       speak(backendReply.text);
       return;
     } catch (error) {
@@ -1004,6 +1064,8 @@ roleSelect?.addEventListener("change", () => {
   loadWatchAlerts();
 });
 
+auditExplainBtn?.addEventListener("click", explainLastAudit);
+
 function startIdleMotion() {
   clearInterval(idleMotionTimer);
   idleMotionTimer = window.setInterval(() => {
@@ -1025,6 +1087,7 @@ startIdleMotion();
 startWatchAlertPolling();
 loadPremarketPlan();
 loadWatchlist();
+loadUserProfile();
 loadMarketDashboard();
 loadAuditReplay();
 loadWatchAlerts();

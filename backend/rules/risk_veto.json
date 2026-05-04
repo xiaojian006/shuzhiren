@@ -1,0 +1,15 @@
+{
+  "patterns": {
+    "attack": "买|进|加仓|满仓|梭哈|打板|半路",
+    "attack_extended": "买|进|加仓|追|打板|半路|梭哈",
+    "all_in": "满仓|梭哈| all in |重仓",
+    "average_down": "补仓|加仓|摊薄|再买",
+    "bottom_fish": "买|进|抄底|补仓|加仓",
+    "high_risk_chase": "追|打板|半路|重仓|梭哈"
+  },
+  "thresholds": {
+    "heavy_position": 0.7,
+    "extreme_drop_pct": -7,
+    "weak_intraday_position": 20
+  }
+}

@@ -1,0 +1,23 @@
+[
+  {
+    "name": "stock_answer_has_conditions",
+    "answer": "【直接结论】等待确认\n【触发条件】指数不弱，板块同步，个股放量站回关键位。\n【失效条件】跌破低点且反抽无量。\n【仓位上限】0 成",
+    "must_contain": ["直接结论", "触发条件", "失效条件", "仓位"],
+    "must_not_match": "必涨|稳赚|确定买|满仓|梭哈"
+  },
+  {
+    "name": "insufficient_data_is_explicit",
+    "answer": "数据不足，不能硬编行情。现在只能给框架判断：先补股票代码、成本和仓位。",
+    "must_contain": ["数据不足", "不能硬编"],
+    "must_not_match": "现价 [0-9]|涨跌幅 [0-9]"
+  },
+  {
+    "name": "risk_veto_must_be_visible",
+    "answer": "【直接结论】风控否决，不能加仓。\n【触发条件】等市场修复后重新评估。\n【失效条件】继续破位。\n【仓位上限】0 成",
+    "must_contain": ["风控否决", "仓位上限"],
+    "risk_veto": {"blocked": true, "reasons": ["满仓"]},
+    "decision": {"trigger_condition": "等市场修复", "invalid_condition": "继续破位"},
+    "confidence": {"score": 70},
+    "critic_should_pass": true
+  }
+]

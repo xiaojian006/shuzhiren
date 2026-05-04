@@ -27,6 +27,13 @@
 - 增加 Agent 离线评测集：`backend/agent_eval_cases.json` 固定覆盖意图、标的、工具路由、用户状态和风控场景。
 - 增加流式进度接口：前端在完整回答返回前通过数字人动作展示“理解问题、工具路由、并发取数、风控校验、生成回答”等步骤。
 - 后端拆出 `backend/agent_runtime.py` 和 `backend/llm_client.py`，并将聊天链路的 LLM 状态改为请求级结果，避免全局状态串扰。
+- 后端继续拆出 `schemas.py`、`rules_config.py`、`llm_output.py`、`persistence.py`、`strategy_memory.py`、`agent_critic.py`、`tool_budget.py`，并提供 `agent.py`、`market_data.py`、`risk.py`、`memory.py`、`audit.py` 模块入口，降低主链路耦合。
+- 核心意图、工具路由、风控阈值、仓位映射迁移到 `backend/rules/` 配置文件，便于不用改代码调整策略。
+- LLM 输出增加结构化 JSON 校验：`verdict`、`reasoning_summary`、`trigger`、`invalid`、`position_limit`、`risk_flags`，不合格自动回退规则答案。
+- 增加 Planner/Critic 自检：回答后检查确定性荐股、触发/失效条件、风控呈现和低置信度数据标注。
+- 增加 SQLite 事件层 `backend/agent_state.sqlite3`，同步记录反馈和审计事件，为长期案例记忆/策略记忆做准备。
+- 决策分档和工具预算继续配置化：`backend/rules/position_policy.json` 控制评分区间、机会仓位和动作口径，`backend/rules/tool_budget.json` 控制不同问题的工具优先级和降级提示。
+- 增加用户画像摘要接口 `GET /api/profile/summary?session_id=xxx`，前端启动和每次回答后会刷新策略记忆、错因画像、观察池数量和反馈统计。
 - 增强股票名称识别：对自然语言问题生成多个短词候选，减少“帮我看一下XX能不能买”这类句子无法识别股票的问题。
 - 增加强制执行表：个股问题会输出空仓/持仓/触发/失效四类条件化动作，GLM 未输出时由规则后处理补齐。
 - 增加“思维复刻”固定流程：市场情绪周期 -> 问题类型 -> 标的层级 -> 资金/情绪/筹码三维判断 -> 明确结论 -> 游资口径输出。
@@ -170,6 +177,9 @@ GLM_DISABLE_THINKING=1
 
 ```bash
 .venv\Scripts\python.exe -m backend.run_agent_eval
+.venv\Scripts\python.exe -m backend.run_response_quality_eval
+.venv\Scripts\python.exe -m backend.test_agent_units
+.venv\Scripts\python.exe -m backend.api_smoke_test
 ```
 
 当前评测集包含 35 条离线用例，不依赖外部行情接口，主要检查：
