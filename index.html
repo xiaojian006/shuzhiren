@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 数字人 - 短线行情研究助手</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero-card">
+        <div class="avatar-stage" aria-label="数字人形象区域">
+          <div class="market-grid"></div>
+          <div class="ticker-strip">
+            <span>情绪周期</span>
+            <span>主线题材</span>
+            <span>仓位纪律</span>
+            <span>风险控制</span>
+          </div>
+          <div id="avatar" class="avatar calm">
+            <div class="aura"></div>
+            <div class="head">
+              <div class="hair"></div>
+              <div class="brow brow-left"></div>
+              <div class="brow brow-right"></div>
+              <div class="eye eye-left"></div>
+              <div class="eye eye-right"></div>
+              <div id="mouth" class="mouth"></div>
+              <div class="cheek cheek-left"></div>
+              <div class="cheek cheek-right"></div>
+            </div>
+            <div class="body">
+              <div class="lapel left"></div>
+              <div class="lapel right"></div>
+              <div class="tie"></div>
+            </div>
+            <div id="gesture" class="gesture">观察盘面</div>
+          </div>
+        </div>
+
+        <div class="profile-panel">
+          <p class="eyebrow">行情驱动 AI 数字人系统</p>
+          <h1>游资框架集合体数字人</h1>
+          <p class="intro">
+            这是一个本地运行的演示数字人：前端负责交互和数字人表达，后端负责行情、Prompt、人设记忆和大模型调度；融合情绪周期、主线题材、龙头辨识度、量价承接和仓位纪律。
+          </p>
+          <div class="status-row">
+            <div>
+              <strong id="moodText">冷静观察</strong>
+              <span>当前表情</span>
+            </div>
+            <div>
+              <strong id="intentText">等待提问</strong>
+              <span>问题理解</span>
+            </div>
+            <div>
+              <strong id="voiceText">语音待命</strong>
+              <span>表达状态</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="chat-card">
+          <div class="card-title">
+            <h2>对话区</h2>
+            <button id="muteBtn" class="ghost-btn" type="button">关闭语音</button>
+          </div>
+          <div id="chatLog" class="chat-log" aria-live="polite">
+            <article class="message bot">
+              <div class="speaker">数字人</div>
+              <p>你好，我是游资框架集合体数字人。启动后端后，我会按“行情数据 + 人设记忆 + 大模型/规则引擎 + 动作触发”完整闭环回答；只打开网页时，会自动降级为浏览器本地分析模式。</p>
+            </article>
+          </div>
+          <form id="chatForm" class="input-row">
+            <input
+              id="questionInput"
+              type="text"
+              autocomplete="off"
+              placeholder="例如：五一过后，豫能控股会涨吗？可以买入吗？"
+              aria-label="输入你的问题"
+            />
+            <button type="submit">发送</button>
+          </form>
+        </div>
+
+        <aside class="control-card">
+          <h2>快速提问</h2>
+          <div class="quick-list">
+            <button type="button" data-question="你怎么看情绪周期和龙头股？">情绪周期</button>
+            <button type="button" data-question="短线交易怎么控制仓位？">仓位纪律</button>
+            <button type="button" data-question="如何复盘今天的市场？">复盘方法</button>
+            <button type="button" data-question="五一过后，豫能控股会涨吗？可以买入吗？">个股分析</button>
+            <button type="button" data-question="现在市场适合进攻还是防守？">攻防判断</button>
+          </div>
+          <div class="market-box">
+            <h3>角色风格</h3>
+            <select id="roleSelect" class="role-select" aria-label="选择数字人角色风格">
+              <option value="cycle">情绪周期型</option>
+              <option value="leader">龙头进攻型</option>
+              <option value="defense">风控防守型</option>
+              <option value="first_board">低位试错型</option>
+            </select>
+          </div>
+          <div class="market-box premarket-box">
+            <h3>盘前作战计划</h3>
+            <div id="premarketPlanPanel" class="premarket-plan-panel">正在生成今日攻防计划。</div>
+          </div>
+          <div class="market-box">
+            <h3>实时行情状态</h3>
+            <div id="marketSnapshot" class="market-snapshot">等待查询。输入股票名称或 6 位 A 股代码可尝试获取腾讯/新浪公开行情。</div>
+          </div>
+          <div class="market-box">
+            <h3>情绪仪表盘</h3>
+            <div id="emotionDashboard" class="emotion-dashboard">等待市场情绪数据。</div>
+          </div>
+          <div class="market-box">
+            <h3>主线强度榜</h3>
+            <div id="mainlineRank" class="mainline-rank">等待板块强度数据。</div>
+          </div>
+          <div class="market-box">
+            <h3>决策面板</h3>
+            <div id="decisionPanel" class="decision-panel">等待 Agent 评分。</div>
+          </div>
+          <div class="market-box">
+            <h3>回答置信度</h3>
+            <div id="confidencePanel" class="confidence-panel">等待数据完整度评估。</div>
+          </div>
+          <div class="market-box">
+            <h3>风控否决</h3>
+            <div id="riskVetoPanel" class="risk-veto-panel">未触发风控否决。</div>
+          </div>
+          <div class="market-box">
+            <h3>数据口径</h3>
+            <div id="lineagePanel" class="lineage-panel">等待数据来源标注。</div>
+          </div>
+          <div class="market-box">
+            <h3>决策审计</h3>
+            <div id="auditPanel" class="audit-panel">等待 Agent 审计记录。</div>
+          </div>
+          <div class="market-box">
+            <h3>审计回放</h3>
+            <div id="auditReplayPanel" class="audit-panel">暂无历史审计。</div>
+          </div>
+          <div class="market-box">
+            <h3>数据源健康</h3>
+            <div id="sourceHealthPanel" class="source-health-panel">等待接口健康数据。</div>
+          </div>
+          <div class="market-box">
+            <h3>观察池提醒</h3>
+            <div id="watchAlertsPanel" class="watch-alerts-panel">暂无触发/失效提醒。</div>
+          </div>
+          <div class="market-box">
+            <h3>观察池</h3>
+            <div id="watchlistPanel" class="watchlist-panel">暂无观察标的。可说“把豫能控股加入观察池”。</div>
+          </div>
+          <div class="capability">
+            <h3>已实现闭环</h3>
+            <p>输入理解 -> 后端行情/LLM -> 结构化分析 -> 语音播报 -> 表情变化 -> 动作反馈</p>
+          </div>
+          <div class="notice">
+            <h3>合规提示</h3>
+            <p>本系统是多游资公开交易框架的研究型集合体，不是任何真实人物本人，不复刻私人决策，不输出确定性买卖点。</p>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
